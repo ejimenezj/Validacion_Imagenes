@@ -1,0 +1,10 @@
+pydantic
+vertexai
+google-cloud-bigquery
+pytz
+fastapi
+Pillow
+google-cloud-aiplatform
+pandas
+db-dtypes
+uvicorn
