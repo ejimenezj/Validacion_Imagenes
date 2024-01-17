@@ -11,6 +11,8 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 COPY . .
 
+ENV GOOGLE_APPLICATION_CREDENTIALS=keys.json
+ENV GOOGLE_CLOUD_PROJECT=crp-dev-dig-mlcatalog
 
 # Expose port
 EXPOSE 8080
