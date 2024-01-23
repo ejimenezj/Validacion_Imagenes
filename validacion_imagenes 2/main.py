@@ -4,27 +4,15 @@ import traceback
 import json
 from google.cloud import bigquery
 from fastapi import FastAPI, HTTPException, Body
-
-from vertexai.preview.generative_models import GenerativeModel, Part
+from vertexai.preview.generative_models import GenerativeModel, Part, Image
 from fastapi.responses import JSONResponse
-
 import promptGallery
-
 from response_processing import parse_json
-
 from classes import ImageRequest
-
 from gcs_utils import load_image_from_url
-
 import pandas as pd
 from google.cloud.bigquery import Client
-
 import logging
-
-from datetime import datetime
-
-import pytz
-
 import time
 
 logging.basicConfig(level=logging.INFO)
@@ -32,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
 
-vertexai.init(project="crp-dev-dig-mlcatalog", location="us-central1")
+vertexai.init(project="crp-dev-dig-mlcatalog", location="us-east4") # us-central1
 
 
 
@@ -101,6 +89,8 @@ def upload_file(image_file, public):
         blob.make_public()
     return blob.public_url
 
+
+
 def insert_into_bigquery(response):
     table_id = "validacion_imagenes.historical_predictions"
     rows = []
@@ -128,68 +118,51 @@ def insert_into_bigquery(response):
     if errors:
         logging.error(f"Error al insertar filas: {errors}")
 
+imagenes = []
+def generate_single_image(img, request: ImageRequest, multimodal_model):
+    logging.info(f"Generando imagen {img.ID}...")
+    tipo = normalize_tipo(img.Tipo)
+    global imagenes
+    if tipo in ['isométrico', 'isometrico']:
+        prompt = promptGallery.setIsometrico(request.Plantilla, request.Medidas, request.Atributos)
+    elif tipo in ['principal', 'detalle']:
+        prompt = promptGallery.setPrincipalDetalle(request.Plantilla, request.Medidas, request.Atributos)
+    elif tipo == 'smoosh':
+        prompt = promptGallery.setSmoosh(request.Atributos)
+    else:
+        raise HTTPException(status_code=400, detail=f"Tipo de imagen no válido: {img.Tipo}")
+    
+    if img.URI.startswith("gs://"):
+        response = multimodal_model.generate_content([prompt, Part.from_uri(img.URI, mime_type="image/jpeg")])
+    else:
+        response = multimodal_model.generate_content([prompt, load_image_from_url(img.URL)])    
+        
+    response_object = {}
+    response_object["ID"] = img.ID
+    response_object_status = {}
+    validaciones_response = parse_json(response.text)
+    response_object_status["Validaciones"] = validaciones_response
+    if all(value == True for value in validaciones_response.values()):
+        response_object_status["Codigo"] = "Exito"
+    else:
+        response_object_status["Codigo"] = "Error"
+    response_object["Status"] = response_object_status
+    imagenes.append(response_object)
 
 def generate_images(request: ImageRequest) -> list:
     start_time = time.time()
     multimodal_model = GenerativeModel("gemini-pro-vision")
-    imagenes = []
-
-    def generate_prompt(img, request):
-        tipo = normalize_tipo(img.Tipo)
-        prompt_generators = {
-            'isométrico': promptGallery.setIsometrico,
-            'isometrico': promptGallery.setIsometrico,
-            'principal': promptGallery.setPrincipalDetalle,
-            'detalle': promptGallery.setPrincipalDetalle,
-            'smoosh': promptGallery.setSmoosh,
-        }
-
-        prompt_generator = prompt_generators.get(tipo)
-        if not prompt_generator:
-            raise HTTPException(status_code=400, detail=f"Tipo de imagen no válido: {img.Tipo}")
-
-        if tipo == 'smoosh':
-            prompt = prompt_generator(request.Atributos)
-        else:
-            prompt = prompt_generator(request.Plantilla, request.Medidas, request.Atributos)
-
-        return prompt
-
-    def generate_single_image(img, request, multimodal_model):
-        logging.info(f"Generando imagen {img.ID}...")
-        prompt = generate_prompt(img, request)
-
-        if img.URI.startswith("gs://"):
-            response = multimodal_model.generate_content([prompt, Part.from_uri(img.URI, mime_type="image/jpeg")])
-        else:
-            response = multimodal_model.generate_content([prompt, load_image_from_url(img.URL)])
-
-        response_object = {
-            "Tipo": img.Tipo,
-            "ID": img.ID,
-            "Status": {
-                "Validaciones": parse_json(response.text),
-                "Codigo": "Exito" if all(value for value in parse_json(response.text).values()) else "Error",
-            },
-        }
-
-        imagenes.append(response_object)
-
-    # Se utilizan threads para generar las imágenes en paralelo
-    # esto quiere decir que cada imagen se genera en un thread diferente
-    threads = [] 
+    hilos = []
     for img in request.Imagenes:
-        thread = threading.Thread(target=generate_single_image, args=(img, request, multimodal_model))
-        threads.append(thread)
-        thread.start() # Se ejecuta la función para cada imagen en un thread diferente
-
-    for thread in threads:
-        thread.join() # Esperamos a que todos los threads terminen
-
+        t = threading.Thread(target=generate_single_image, args=(img, request, multimodal_model))
+        hilos.append(t)
+        t.start() # Iniciamos el hilo
+    for hilo in hilos:
+        hilo.join() # Esperamos a que todos los hilos terminen
+    
     validation_time = time.time() - start_time
-    logging.info(f"Tiempo de validación: {validation_time} segundos")
-    
-    
+    logging.info(f"Tiempo de validación: {validation_time}")
+
     images_part = []
     for num, img in enumerate(request.Imagenes):
         if num>=9: # Max 10 images
@@ -199,57 +172,35 @@ def generate_images(request: ImageRequest) -> list:
         else:
             images_part.append(load_image_from_url(img.URL))
     
-    start_time = time.time()
-
-    # Parte de Enriquecimiento y Comparación
-    enriquecimiento_dict = {}
-    comparacion_dict = {}
-    threads = []
-
-    def enrich_and_compare_single_image(img):
-        images_part = []
-        if img.URI.startswith("gs://"):
-            images_part.append(Part.from_uri(img.URI, mime_type="image/jpeg"))
-        else:
-            images_part.append(load_image_from_url(img.URL))
-
-        # Parte de Enriquecimiento
+        # Enriquecimiento
+        start_time = time.time()
         atributos_de_interes = set(request.Atributos.keys()).intersection(attributes_descriptions.keys())
         atributos_detalle = {atributo: attributes_descriptions[atributo] for atributo in list(atributos_de_interes)}
         prompt_enriquecimiento = promptGallery.Enriquecimiento_imagenes(atributos_detalle)
         enriquecimiento_response = multimodal_model.generate_content([prompt_enriquecimiento, *images_part])
-
-        # Parte de Comparación
+        
+        # print(enriquecimiento_response.text)
+        # Comparacion
         prompt_comparacion = promptGallery.comparacion(enriquecimiento_response.text, request.Atributos)
         response_comparacion = multimodal_model.generate_content([prompt_comparacion, *images_part])
-
-        enriquecimiento_dict[img.ID], comparacion_dict[img.ID] = parse_json(enriquecimiento_response.text), parse_json(response_comparacion.text)
-
-    # Aquí se utilizan threads para enriquecer y comparar las imágenes en paralelo
-    for num, img in enumerate(request.Imagenes):
-        thread = threading.Thread(target=enrich_and_compare_single_image, args=(img,))
-        threads.append(thread)
-        thread.start()
-
-    for thread in threads:
-        thread.join()
-
-    enrichment_comparison_time = time.time() - start_time
-    logging.info(f"Tiempo de enriquecimiento/comparación: {enrichment_comparison_time} segundos")
+        enriquecimiento_dict = parse_json(enriquecimiento_response.text)
+        comparacion_dict = parse_json(response_comparacion.text)
+    
+    print("comparacion_dict:", comparacion_dict)
+    comparacion_time = time.time() - start_time
+    logging.info(f"Tiempo de enriq/comparación: {comparacion_time}")
 
     atributos = []
     for atributo in request.Atributos:
         atributo_dict = {}
         atributo_dict["Atributo"] = atributo
-        atributo_dict["Status"] = comparacion_dict[img.ID] if img.ID in comparacion_dict else True
-        atributo_dict["Predicciones"] = [{
-            "Valor": enriquecimiento_dict[img.ID] if img.ID in enriquecimiento_dict else request.Atributos[atributo],
-            "Confianza": 1,
-            "Match": comparacion_dict[img.ID]
-        }]
+        atributo_dict["Status"] = comparacion_dict[atributo] if atributo in comparacion_dict else True
+        atributo_dict["Predicciones"] = [ {"Valor": enriquecimiento_dict[atributo] if atributo in enriquecimiento_dict else request.Atributos[atributo],
+                                           "Confianza":1,
+                                           "Match": comparacion_dict[atributo]} ]
         atributos.append(atributo_dict)
-
-    return {"Imagenes": imagenes, "Atributos": atributos}
+    return {"Imagenes": imagenes, 
+            "Atributos": atributos}
 
 # Cargamos la tabla de bigquery con los atributos y descripciones
 atributos = cargar_tabla_atributos()
@@ -269,7 +220,7 @@ def generate_text_endpoint(request: ImageRequest = Body(...)):
         response = successful_response(results)
 
         # insertamos los resultados en bigquery
-        insert_into_bigquery(response)
+        #insert_into_bigquery(response)
 
         return response
 
@@ -278,7 +229,7 @@ def generate_text_endpoint(request: ImageRequest = Body(...)):
 
     except Exception as e:
         logging.error(f"Error: {e}")
-        traceback.print_exc()  # Print traceback
+        traceback.print_exc()  
         return handle_error(e)
 
 
@@ -294,8 +245,7 @@ def successful_response(results):
             }
         },
         "Imagenes": results["Imagenes"],
-        "Atributos": results["Atributos"],
-        "date": datetime.now(pytz.timezone('America/Mexico_City')).strftime("%Y-%m-%d")
+        "Atributos": results["Atributos"]
     }
 
 

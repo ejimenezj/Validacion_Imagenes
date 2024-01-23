@@ -215,9 +215,9 @@ def comparacion(atributos_predichos,atributos_reales):
 
     [INSTRUCCIONES]
     - Revisa los atributos reales y predichos detalladamente.
-    - Devolver en formato JSON en el formato Atributo(str):Match(bool) siguiendo el siguiente proceso:
+    - Devolver en formato JSON en el formato Atributo real (str):Match(bool) siguiendo el siguiente proceso:
         - Si el atributo real es igual (o es sinónimo) al atributo predicho, colocarás True.
-        - Si un atributo está mencionado en los atributos predichos pero no en los predichos, colocarás True
+        - Si un atributo está mencionado en los atributos reales pero no en los predichos, colocarás True.
         - Si el atributo real no es igual (o no es sinónimo) al atributo predicho, colocarás False.
         - Si un atributo está mencionado en los atributos predichos pero no en los reales, no lo colocarás en el JSON.
     - De los elementos que se encuentran en atributos predichos solo considera aquellos que se encuentran en atributos reales.
@@ -232,15 +232,3 @@ def comparacion(atributos_predichos,atributos_reales):
     Atributos predichos: {atributos_predichos}
     """
 
-
-
-# def Revision(atributos):
-#     return f"""
-#     Contexto (instruccion)
-#     Eres un experto en administrar categorías e información de producto para el catálogo de productos de una tienda departamental.
-
-#     [MISIÓN]
-
-#     [ATRIBUTOS]
-#     {atributos}
-#     """
